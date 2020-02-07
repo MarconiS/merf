@@ -33,20 +33,9 @@ class MERF(object):
         if "n_estimators" not in self.rf_params:
             self.rf_params.update({"n_estimators": n_estimators})
             
-        # initialize parameters from CCB-ID        
-        # set the base attributes for the model object
-        if models is None:
-            gbc = _ensemble.GradientBoostingClassifier()
-            rfc = _ensemble.RandomForestClassifier()
-            self.models_ = [gbc, rfc]
-        else:
-            # if a single model is passed, convert to a list so it is iterable
-            if type(models) is not list:
-                models = list(models)
-            self.models_ = models
-
+        # initialize parameters from CCB-ID                
          # set an attribute with the number of models
-        self.n_models_ = len(self.models_)
+        self.n_models_ = 1
         
         # set the model calibration function
         if calibrator is None:
