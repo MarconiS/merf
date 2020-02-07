@@ -9,13 +9,20 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.exceptions import NotFittedError
+from sklearn.ensemble import BaggingClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn import calibration as _calibration
+import copy as _copy
+import os as _os
 
+_path = _os.path.realpath(__file__)
 logger = logging.getLogger(__name__)
 
 
 class MERF(object):
     def __init__(
-        self, n_estimators=300, min_iterations=10, gll_early_stop_threshold=None, max_iterations=20, rf_params=None
+        self, n_estimators=300, min_iterations=10, gll_early_stop_threshold=None, max_iterations=20, rf_params=None, 
+        calibrator=None, run_calibration=None,  average_proba=True, labels=None, good_bands=None, reducer=None
     ):
         self.min_iterations = min_iterations
         self.gll_early_stop_threshold = gll_early_stop_threshold
@@ -25,7 +32,61 @@ class MERF(object):
         self.rf_params.update({"oob_score": True, "n_jobs": -1})
         if "n_estimators" not in self.rf_params:
             self.rf_params.update({"n_estimators": n_estimators})
+            
+        # initialize parameters from CCB-ID        
+        # set the base attributes for the model object
+        if models is None:
+            gbc = _ensemble.GradientBoostingClassifier()
+            rfc = _ensemble.RandomForestClassifier()
+            self.models_ = [gbc, rfc]
+        else:
+            # if a single model is passed, convert to a list so it is iterable
+            if type(models) is not list:
+                models = list(models)
+            self.models_ = models
 
+         # set an attribute with the number of models
+        self.n_models_ = len(self.models_)
+        
+        # set the model calibration function
+        if calibrator is None:
+            self.calibrator = _calibration.CalibratedClassifierCV(method='sigmoid', cv=3)
+        else:
+            self.calibrator = calibrator
+            
+         # set the attribute determining whether to perform calibration on a per-model basis
+        if run_calibration is None:
+            self.run_calibration_ = np.repeat(True, self.n_models_)
+        else:
+            self.run_calibration_ = run_calibration
+
+        # set an attribute to hold the final calibrated models
+        self.calibrated_models_ = np.repeat(None, self.n_models_)
+
+        # set the flag to average the probability outputs    
+        self.average_proba_ = average_proba
+        
+        # and set some properties that will be referenced later
+        #  like species labels and a list of good bands
+        if labels is None:
+            self.labels_ = None
+        else:
+            self.labels_ = labels
+
+        if good_bands is None:
+            self.good_bands_ = None
+        else:
+            self.good_bands_ = good_bands
+
+        if reducer is None:
+            self.reducer = None
+        else:
+            self.reducer = reducer
+
+        self.n_features_ = None
+        
+        #MERF specific arguments
+        
         self.cluster_counts = None
         self.trained_rf = None
         self.trained_b = None
@@ -71,13 +132,14 @@ class MERF(object):
 
         return y_hat
 
-    def fit(self, X, Z, clusters, y):
+    def fit(self, X, Z, clusters, y, sample_weight=None):
         """
         Fit MERF using EM algorithm.
         :param X: fixed effect covariates
         :param Z: random effect covariates
         :param clusters: cluster assignments for samples
         :param y: response/target variable
+        :param sample_weights - the per-sample training weights
         :return: fitted model
         """
 
@@ -158,8 +220,10 @@ class MERF(object):
             assert len(y_star.shape) == 1
 
             # Do the random forest regression with all the fixed effects features
-            rf = RandomForestRegressor(**self.rf_params)
-            rf.fit(X, y_star)
+            #rf = RandomForestRegressor(**self.rf_params)
+            #TODO allow here for both random forests and gradient boosting and stack models later
+            rf = RandomForestClassifier(**self.rf_params)
+            rf.fit(X, y_star, sample_weight=sample_weight)
             f_hat = rf.oob_prediction_
 
             # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ M-step ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -266,6 +330,27 @@ class MERF(object):
         self.trained_b = b_hat_df
 
         return self
+
+    def calibrate(self, x, y, run_calibration=None):
+        """Calibrates the probabilities for each classification model
+        
+        Args:
+            x               - the probability calibration features
+            y               - the probability calibration labels
+            run_calibration - a boolean array with length n_models specifying
+                              True for each model to calibrate
+                              
+        Returns:
+            None. Updates each item in self.calibrated_models_
+        """
+        for i in range(self.n_models_):
+            if self.run_calibration_[i] or run_calibration[i]:
+                self.calibrator.set_params(base_estimator=self.models_[i])
+                self.calibrator.fit(x, y)
+                self.calibrated_models_[i] = _copy.copy(self.calibrator)
+            else:
+                self.calibrated_models_[i] = _copy.copy(self.models_[i])
+
 
     def score(self, X, Z, clusters, y):
         raise NotImplementedError()
