@@ -8,12 +8,15 @@ import logging
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.exceptions import NotFittedError
 from sklearn.ensemble import BaggingClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn import calibration as _calibration
 import copy as _copy
 import os as _os
+from IPython.core.debugger import set_trace
+from sklearn.metrics import mutual_info_score
 
 _path = _os.path.realpath(__file__)
 logger = logging.getLogger(__name__)
@@ -142,7 +145,7 @@ class MERF(object):
         n_obs = len(y)
         q = Z.shape[1]  # random effects dimension
         Z = np.array(Z)  # cast Z to numpy array (required if it's a dataframe, otw, the matrix mults later fail)
-
+        nclasses = len(np.unique(y))
         # Create a series where cluster_id is the index and n_i is the value
         cluster_counts = clusters.value_counts()
 
@@ -213,8 +216,8 @@ class MERF(object):
             #TODO allow here for both random forests and gradient boosting and stack models later
             rf = RandomForestClassifier(**self.rf_params)
             rf.fit(X, y_star, sample_weight=sample_weight)
-            f_hat = rf.oob_prediction_
-
+            f_hat = rf.oob_decision_function_
+            set_trace()
             # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ M-step ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
             sigma2_hat_sum = 0
             D_hat_sum = 0
@@ -229,6 +232,7 @@ class MERF(object):
 
                 # index into f_hat
                 f_hat_i = f_hat[indices_i]
+                y_i_cat = np.eye(nclasses)[y_i]
 
                 # Compute V_hat_i
                 V_hat_i = Z_i.dot(D_hat).dot(Z_i.T) + sigma2_hat * I_i
@@ -236,11 +240,17 @@ class MERF(object):
                 # Compute b_hat_i
                 V_hat_inv_i = np.linalg.pinv(V_hat_i)
                 logger.debug("M-step, pre-update, cluster {}, b_hat = {}".format(cluster_id, b_hat_df.loc[cluster_id]))
-                b_hat_i = D_hat.dot(Z_i.T).dot(V_hat_inv_i).dot(y_i - f_hat_i)
+
+                KLD = np.zeros(len(y_i))
+                for x in range(len(y_i)):
+                    KLD[x] = mutual_info_score(f_hat_i[x], y_i_cat[x])
+                   
+                set_trace()
+                b_hat_i = D_hat.dot(Z_i.T).dot(V_hat_inv_i).dot(KLD)
                 logger.debug("M-step, post-update, cluster {}, b_hat = {}".format(cluster_id, b_hat_i))
 
                 # Compute the total error for this cluster
-                eps_hat_i = y_i - f_hat_i - Z_i.dot(b_hat_i)
+                eps_hat_i = KLD - Z_i.dot(b_hat_i)
 
                 logger.debug("------------------------------------------")
                 logger.debug("M-step, cluster {}".format(cluster_id))
@@ -281,20 +291,30 @@ class MERF(object):
                 y_i = y_by_cluster[cluster_id]
                 Z_i = Z_by_cluster[cluster_id]
                 I_i = I_by_cluster[cluster_id]
+                
+                #from vector to category
+                y_i_cat = np.eye(nclasses)[y_i]
 
                 # Slice f_hat and get b_hat
                 f_hat_i = f_hat[indices_i]
                 R_hat_i = sigma2_hat * I_i
                 b_hat_i = b_hat_df.loc[cluster_id]
+                
+                set_trace()
+
+                KLD = np.zeros(len(y_i))
+                for x in range(len(y_i)):
+                    KLD[x] = mutual_info_score(f_hat_i[x], y_i_cat[x])
+                
 
                 # Numerically stable way of computing log(det(A))
                 _, logdet_D_hat = np.linalg.slogdet(D_hat)
                 _, logdet_R_hat_i = np.linalg.slogdet(R_hat_i)
 
                 gll += (
-                    (y_i - f_hat_i - Z_i.dot(b_hat_i))
+                    (KLD - Z_i.dot(b_hat_i))
                     .T.dot(np.linalg.pinv(R_hat_i))
-                    .dot(y_i - f_hat_i - Z_i.dot(b_hat_i))
+                    .dot(KLD - Z_i.dot(b_hat_i))
                     + b_hat_i.T.dot(np.linalg.pinv(D_hat)).dot(b_hat_i)
                     + logdet_D_hat
                     + logdet_R_hat_i
